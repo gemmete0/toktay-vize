@@ -193,20 +193,29 @@ document.addEventListener('DOMContentLoaded', function () {
     let visas = [];
 
     // Initialize Flatpickr
-    flatpickr("#visa-start", {
-        locale: "tr",
-        dateFormat: "Y-m-d",
-        altInput: true,
-        altFormat: "d F Y", // Görünecek format: 25 Aralık 2025
-        theme: "dark"
-    });
-
-    flatpickr("#visa-end", {
+    const endDatePicker = flatpickr("#visa-end", {
         locale: "tr",
         dateFormat: "Y-m-d",
         altInput: true,
         altFormat: "d F Y",
         theme: "dark"
+    });
+
+    const startDatePicker = flatpickr("#visa-start", {
+        locale: "tr",
+        dateFormat: "Y-m-d",
+        altInput: true,
+        altFormat: "d F Y",
+        theme: "dark",
+        onChange: function (selectedDates, dateStr, instance) {
+            endDatePicker.set('minDate', dateStr);
+
+            // Eğer seçili bitiş tarihi yeni başlangıç tarihinden küçükse temizle
+            const endDate = endDatePicker.selectedDates[0];
+            if (endDate && endDate < selectedDates[0]) {
+                endDatePicker.clear();
+            }
+        }
     });
 
     if (addVisaBtn) {
@@ -232,10 +241,11 @@ document.addEventListener('DOMContentLoaded', function () {
             visas.push(visa);
             renderVisas();
 
-            // Clear inputs
-            document.getElementById('visa-start').value = '';
-            document.getElementById('visa-end').value = '';
-            document.getElementById('visa-country').value = '';
+            // Clear inputs properly using Flatpickr instances
+            startDatePicker.clear();
+            endDatePicker.clear();
+            document.getElementById('visa-country').value = ''; // Reset select
+            document.getElementById('visa-type').selectedIndex = 0; // Reset type
         });
 
         calculateBtn.addEventListener('click', () => {
@@ -260,7 +270,7 @@ document.addEventListener('DOMContentLoaded', function () {
             const li = document.createElement('li');
             // Basit gün farkı ile süre hesaplama (Görsel amaçlı)
             const diffTime = Math.abs(new Date(visa.end) - new Date(visa.start));
-            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
 
             li.innerHTML = `
                 <div>
@@ -271,15 +281,6 @@ document.addEventListener('DOMContentLoaded', function () {
                 <i class="fas fa-trash delete-visa" onclick="removeVisa(${visa.id})"></i>
             `;
             visaList.appendChild(li);
-        });
-
-        // Delete event delegation
-        document.querySelectorAll('.delete-visa').forEach(btn => {
-            btn.addEventListener('click', function () {
-                // onclick inline is simpler for dynamic elements here, but let's assume global scope or direct attachment.
-                // Since this is inside a module/closure, inline onclick wont find calculateCascade easily unless attached to window.
-                // Instead, using the ID passed in closure would be better, but let's stick to re-render.
-            });
         });
     }
 
@@ -293,6 +294,11 @@ document.addEventListener('DOMContentLoaded', function () {
     window.removeVisa = function (id) {
         visas = visas.filter(v => v.id !== id);
         renderVisas();
+
+        // Hide result if list is empty
+        if (visas.length === 0) {
+            resultDiv.style.display = 'none';
+        }
     }
 
     function calculateCascade(visaHistory) {
@@ -300,11 +306,32 @@ document.addEventListener('DOMContentLoaded', function () {
         const twoYearsAgo = new Date(now.getFullYear() - 2, now.getMonth(), now.getDate());
         const threeYearsAgo = new Date(now.getFullYear() - 3, now.getMonth(), now.getDate());
 
-        // Helper to get duration in days
+        // Filter for C Type visas only (Exclude D Type)
+        const cTypeVisas = visaHistory.filter(v => v.type === 'C');
+
+        // If no C type visas are present (e.g. only D types or empty)
+        if (cTypeVisas.length === 0) {
+            return {
+                type: 'warning',
+                message: "Mevcut vize geçmişiniz, Cascade Kuralıyla uzun süreli vize verilmesi için aranan kriterleri henüz karşılamamaktadır. (D tipi vizeler hesaplamaya dahil edilmemektedir.)"
+            };
+        }
+
+        // Sort visas by end date descending to find the latest reference
+        const sortedVisas = [...cTypeVisas].sort((a, b) => new Date(b.end) - new Date(a.end));
+        const lastVisa = sortedVisas[0];
+        const lastVisaEndDate = new Date(lastVisa.end);
+
+        // Calculate result validity date (1 year after the last visa's end date)
+        const validityDate = new Date(lastVisaEndDate);
+        validityDate.setFullYear(validityDate.getFullYear() + 1);
+
+        // Helper to get duration in days (Inclusive: Start and End days count)
         const getDuration = (v) => {
             const start = new Date(v.start);
             const end = new Date(v.end);
-            return Math.ceil((end - start) / (1000 * 60 * 60 * 24));
+            const diffTime = Math.abs(end - start);
+            return Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
         };
 
         // Helper to check if visa is within a specific date range
@@ -312,74 +339,100 @@ document.addEventListener('DOMContentLoaded', function () {
             return new Date(v.end) >= dateLimit;
         };
 
-        // Rule 3: 5-Year Visa Eligibility
-        // Requirement: Validly used a multiple-entry visa with a validity of at least two years within the previous three years.
-        const hasTwoYearVisa = visaHistory.some(v =>
-            isWithin(v, threeYearsAgo) && getDuration(v) >= 700 // Approx 2 years
+        let result = {
+            duration: "kısa süreli",
+            reason: "Yeterli vize geçmişiniz bulunmuyor.",
+            validUntil: validityDate // Pass the calculated date
+        };
+
+        // Kural 3: 5 Yıllık (Son 3 yılda 2 yıllık vize varsa)
+        const hasTwoYearVisa = cTypeVisas.some(v =>
+            isWithin(v, threeYearsAgo) && getDuration(v) >= 700
         );
 
         if (hasTwoYearVisa) {
-            return {
-                result: "5 Yıl (Multi)",
-                reason: "Son 3 yıl içinde en az 2 yıllık bir vizeniz bulunduğu için, bir sonraki vizeniz genellikle 5 yıllık verilir."
-            };
+            result.duration = "5 yıllık";
+            result.reason = "Son 3 yıl içinde en az 2 yıllık bir vizeniz bulunduğu için.";
+            return result;
         }
 
-        // Rule 2: 2-Year Visa Eligibility
-        // Requirement: Validly used a multiple-entry visa with a validity of at least one year within the previous two years.
-        const hasOneYearVisa = visaHistory.some(v =>
-            isWithin(v, twoYearsAgo) && getDuration(v) >= 360 // Approx 1 year
+        // Kural 2: 2 Yıllık (Son 2 yılda 1 yıllık vize varsa)
+        const hasOneYearVisa = cTypeVisas.some(v =>
+            isWithin(v, twoYearsAgo) && getDuration(v) >= 360
         );
 
         if (hasOneYearVisa) {
-            return {
-                result: "2 Yıl (Multi)",
-                reason: "Son 2 yıl içinde en az 1 yıllık bir vizeniz bulunduğu için, sonraki vizeniz 2 yıllık olabilir."
-            };
+            result.duration = "2 yıllık";
+            result.reason = "Son 2 yıl içinde en az 1 yıllık bir vizeniz bulunduğu için.";
+            return result;
         }
 
-        // Rule 1: 1-Year Visa Eligibility
-        // Requirement: Obtained and lawfully used three short-stay visas within the previous two years.
-        const recentVisas = visaHistory.filter(v => isWithin(v, twoYearsAgo));
+        // Kural 1: 1 Yıllık (Son 2 yılda 3 adet vize varsa)
+        const recentVisas = cTypeVisas.filter(v => isWithin(v, twoYearsAgo));
 
         if (recentVisas.length >= 3) {
-            return {
-                result: "1 Yıl (Multi)",
-                reason: "Son 2 yıl içinde 3 adet vizeniz bulunduğu için, Cascade kuralına göre 1 yıllık vizeye hak kazanıyorsunuz."
-            };
+            result.duration = "1 yıllık";
+            result.reason = "Son 2 yıl içinde 3 adet vizeniz bulunduğu için.";
+            return result;
         }
 
-        // Fallbacks
-        if (recentVisas.length >= 2) {
-            return {
-                result: "6 Ay - 1 Yıl",
-                reason: "Cascade kuralı için 3 vize gerekiyor ancak geçmiş 2 vizeniz olumlu bir referans oluşturacaktır."
-            };
+        // Diğer Durumlar (Referans siteye göre güncellendi)
+        if (recentVisas.length === 2) {
+            result.duration = "1 yıllık";
+            result.reason = "Son 2 yılda 2 adet geçmiş vizeniz olduğu için.";
+            return result;
         } else if (recentVisas.length === 1) {
-            return {
-                result: "3 Ay - 6 Ay",
-                reason: "Henüz yeterli vize yoğunluğu yok, ancak referansınız var. Genellikle kısa süreli çok girişli verilir."
-            };
-        } else {
-            return {
-                result: "İlk Kez / Kısa Süreli",
-                reason: "Son 2 yılda yeterli vize geçmişi görünmüyor. Genellikle seyahat süreniz kadar veya kısa süreli verilir."
-            };
+            result.duration = "6 aylık";
+            result.reason = "Son 2 yılda 1 adet geçmiş vizeniz olduğu için.";
+            return result;
         }
+
+        return result;
     }
 
     function showResult(prediction) {
+        // Handle warning case (e.g. only D-Type visas)
+        if (prediction.type === 'warning') {
+            resultDiv.innerHTML = `
+                <div class="result-warning-text">
+                    <p>${prediction.message}</p>
+                </div>
+            `;
+            resultDiv.className = 'calc-result warning-container';
+            resultDiv.style.display = 'block';
+            resultDiv.scrollIntoView({ behavior: 'smooth' });
+            return;
+        }
+
+        // Format the validUntil date from prediction
+        const formattedDate = prediction.validUntil.toLocaleDateString('tr-TR');
+
         resultDiv.innerHTML = `
-            <h3>Tahmini Vize Süresi</h3>
-            <p>${prediction.reason}</p>
-            <span>${prediction.result}</span>
-            <p style="font-size: 12px; margin-top: 15px; color: #888;">*Bu hesaplama resmi "Schengen Visa Code" kurallarına dayanmaktadır. Kesin sonuç konsolosluğa bağlıdır.</p>
+            <div class="result-success-text">
+                <p>
+                    Pasaportunuzun süresinin uygun olması koşuluyla <strong>${formattedDate}</strong> tarihine dek yapacağınız başvurularda <strong>${prediction.duration}</strong> vize alma hakkına sahipsiniz.
+                </p>
+            </div>
+
+            <div class="result-info-box">
+                <a href="#contact" style="text-decoration: none; color: inherit;">
+                    Size en uygun ülkeyi seçme ve randevu alma konusunda çağrı merkezimizle görüşme yapmak için kayıt bırakabilirsiniz.
+                </a>
+            </div>
+
+            <div class="result-disclaimer">
+                <p>Bu hesaplama, Avrupa Komisyonu'nun <strong>Visa Code Handbook I (26.06.2024)</strong> ve Türkiye'ye özel olarak uyarlanmış <strong>uygulama kararlarına (15.07.2025)</strong> dayanmaktadır. Sonuçlar yalnızca tavsiye niteliğindedir. Nihai vize kararı ve süresi, konsolosluğun takdirindedir.</p>
+                <p class="warning-text"><strong>Önemli:</strong> Pasaportunuzun geçerlilik süresinin, talep ettiğiniz vize bitiş tarihinden itibaren en az 3 ay daha uzun olması gerektiğini unutmayın.</p>
+            </div>
         `;
-        resultDiv.className = 'calc-result success';
+
+        resultDiv.className = 'calc-result success-container';
+        resultDiv.style.display = 'block';
 
         // Auto scroll to result
         resultDiv.scrollIntoView({ behavior: 'smooth' });
     }
 
 });
+
 
